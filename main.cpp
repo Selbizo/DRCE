@@ -1,8 +1,15 @@
-// Демо/тест DRCE-LOC.
-#include <iomanip>
-#include <vector>
-#include <utility>
+// Демо/тест DRCE-LOC с интерактивной настройкой параметров (GUI).
 //
+// Клавиши управления (терминал):
+//   a/d   – bias           (±1)
+//   w/s   – lambda         (±1)
+//   k/j   – k1             (±0.1)
+//   i/u   – k2             (±0.1)
+//   o/p   – dde            (±0.1)
+//   l/;   – bright         (±1)
+//   r     – сброс к дефолту
+//   s     – сохранить out_drce_loc.png с текущими параметрами
+//   Esc   – выход
 //
 // Если путь не задан или файл не открылся — генерируется синтетическая
 // сцена с высоким динамическим диапазоном (аналог "rich scene" из статьи:
@@ -13,6 +20,8 @@
 #include "drce_loc.hpp"
 #include <chrono>
 #include <iostream>
+#include <opencv2/highgui.hpp>
+#include <opencv2/imgproc.hpp>
 
 static cv::Mat makeSyntheticHDRScene(int rows = 768, int cols = 1024) {
     // Эмуляция 14-битного сенсора (диапазон исходных данных 0..16383),
@@ -113,80 +122,119 @@ int main(int argc, char** argv) {
     clahe->apply(src8u_for_clahe, claheOut);
     cv::imwrite("out_baseline_clahe.png", claheOut);
 
-    // --- DRCE-LOC ---
+    // --- DRCE-LOC с интерактивной настройкой ---
     DRCELOC::Params params;
     // Размер блока ~64x64 при 1024x768, как рекомендует Section 2.4 статьи.
     params.blockRows = std::max(1, src.rows / 32);
     params.blockCols = std::max(1, src.cols / 32);
     params.delta2   = -1.0;
-    params.bias   = 100.0;
-    params.lambda = 200.0;
-    params.k1 = 1.0;
-    params.k2 = 0.4;
-    params.dde = 1.0;
-    params.bright = 128.0;
-
-    DRCELOC algo(params);
+    params.bias     = 100.0;
+    params.lambda   = 200.0;
+    params.k1       = 1.0;
+    params.k2       = 0.4;
+    params.dde      = 1.0;
+    params.bright   = 128.0;
 
     auto t0 = std::chrono::high_resolution_clock::now();
+    DRCELOC algo(params);
     cv::Mat out = algo.process(src);
     auto t1 = std::chrono::high_resolution_clock::now();
     double ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
 
-    std::cout << "DRCE-LOC время обработки: " << ms << " мс "
-              << "(blockRows=" << params.blockRows << ", blockCols=" << params.blockCols << ")\n";
+    cv::Mat display;
+    cv::normalize(out, display, 0, 255, cv::NORM_MINMAX);
+    display.convertTo(display, CV_8U);
 
-    cv::imwrite("out_drce_loc.png", out);
+    const char* windowName = "DRCE-LOC Interactive";
+    cv::namedWindow(windowName, cv::WINDOW_AUTOSIZE);
 
-    // Промежуточные слои — для отладки/апробации (сравнение с Figure 4-5 статьи).
-    // Нумерация соответствует шагам алгоритма (Section 2.1, Figure 2 статьи).
-    saveNorm("step01_block_std.png",  algo.debug().blockStd);
-    saveNorm("step03_NStretch.png",   algo.debug().NStretch);
-    saveNorm("step03_NMean.png",      algo.debug().NMean);
-    saveNorm("step04_gf_detail.png",  algo.debug().gfDetail);
-    saveNorm("step05_Igc.png",        algo.debug().Igc);
-    saveNorm("step06_base_out.png",   algo.debug().baseOut);
-    saveNorm("step07_detail_out.png", algo.debug().detailOut);
+    while (true) {
+        // Формируем строку с текущими параметрами
+        std::string info = "bias [a,d]=" + std::to_string(params.bias).substr(0, 5) +
+                           " lambda [w,x]=" + std::to_string(params.lambda).substr(0, 5) +
+                           " k1 [k,j]=" + std::to_string(params.k1).substr(0, 4) +
+                           " k2 [i,u]=" + std::to_string(params.k2).substr(0, 4) +
+                           " dde [o,p]=" + std::to_string(params.dde).substr(0, 4) +
+                           " bright [;,']=" + std::to_string(params.bright).substr(0, 5) +
+                           " | t=" + std::to_string(ms).substr(0, 5) + "ms";
 
-    // --- Метрики из статьи (Section 3.1): RMS (Eq.9), Entropy (Eq.10), Tenengrad (Eq.13) ---
-    auto computeRMS = [](const cv::Mat& img8u) {
-        cv::Scalar mean, stddev;
-        cv::meanStdDev(img8u, mean, stddev);
-        return stddev[0]; // RMS относительно среднего, как в Eq. 9
-    };
-    auto computeEntropy = [](const cv::Mat& img8u) {
-        cv::Mat hist;
-        int histSize = 256;
-        float range[] = {0, 256};
-        const float* ranges[] = {range};
-        cv::calcHist(&img8u, 1, 0, cv::Mat(), hist, 1, &histSize, ranges);
-        hist /= (double)(img8u.rows * img8u.cols);
-        double entropy = 0.0;
-        for (int i = 0; i < histSize; ++i) {
-            float p = hist.at<float>(i);
-            if (p > 1e-9f) entropy -= p * std::log2(p);
+        cv::Mat vis = display.clone();
+        cv::putText(vis, info, cv::Point(10, 25),
+                    cv::FONT_HERSHEY_SIMPLEX, 0.55, cv::Scalar(0, 255, 0), 1);
+
+        cv::imshow(windowName, vis);
+
+        int key = cv::waitKey(0) & 0xFF;
+        bool changed = false;
+
+        switch (key) {
+            case 27:  // Esc — выход
+                cv::destroyAllWindows();
+                cv::imwrite("out_drce_loc.png", display);
+                return 0;
+
+            case 115: // 's' — сохранить результат
+                cv::imwrite("out_drce_loc.png", display);
+                std::cout << "Сохранено: out_drce_loc.png\n";
+                break;
+
+            case 114: // 'r' — сброс к дефолту
+                params.bias     = 100.0;
+                params.lambda   = 200.0;
+                params.k1       = 1.0;
+                params.k2       = 0.4;
+                params.dde      = 1.0;
+                params.bright   = 128.0;
+                changed = true;
+                break;
+
+            case 'a':   // bias -1
+                params.bias     -= 1.0;  changed = true; break;
+            case 'd':   // bias +1
+                params.bias     += 1.0;  changed = true; break;
+            case 'w':   // lambda +1
+                params.lambda   += 1.0;  changed = true; break;
+            case 'x':   // lambda -1
+                params.lambda   -= 1.0;  changed = true; break;
+            case 'k':   // k1 +0.1
+                params.k1       += 0.1f; changed = true; break;
+            case 'j':   // k1 -0.1
+                params.k1       -= 0.1f; changed = true; break;
+            case 'i':   // k2 +0.1
+                params.k2       += 0.1f; changed = true; break;
+            case 'u':   // k2 -0.1
+                params.k2       -= 0.1f; changed = true; break;
+            case 'o':   // dde +0.1
+                params.dde      += 0.1f; changed = true; break;
+            case 'p':   // dde -0.1
+                params.dde      -= 0.1f; changed = true; break;
+            case ';':   // bright +1  (key right of 'l' on US keyboard)
+                params.bright   += 1.0f; changed = true; break;
+            case '\'':  // bright -1  (apostrophe, next to ';')
+                params.bright   -= 1.0f; changed = true; break;
+
+            default:
+                // Непознанная клавиша — игнорируем
+                break;
         }
-        return entropy;
-    };
-    auto computeTenengrad = [](const cv::Mat& img8u) {
-        cv::Mat gx, gy;
-        cv::Sobel(img8u, gx, CV_32F, 1, 0, 3);
-        cv::Sobel(img8u, gy, CV_32F, 0, 1, 3);
-        cv::Mat mag2 = gx.mul(gx) + gy.mul(gy);
-        return cv::mean(mag2)[0];
-    };
 
-    std::cout << "\n--- Сравнение метрик (Section 3.1 статьи) ---\n";
-    std::cout << "                RMS      Entropy   Tenengrad\n";
-    for (auto& [name, img] : std::vector<std::pair<std::string, cv::Mat>>{
-             {"Linear/AGC", baseline8u}, {"CLAHE", claheOut}, {"DRCE-LOC", out}}) {
-        std::cout << std::left << std::setw(14) << name
-                  << std::right << std::setw(8) << computeRMS(img)
-                  << std::setw(11) << computeEntropy(img)
-                  << std::setw(12) << computeTenengrad(img) << "\n";
+        if (changed) {
+            t0 = std::chrono::high_resolution_clock::now();
+            DRCELOC algo2(params);
+            out = algo2.process(src);
+            t1 = std::chrono::high_resolution_clock::now();
+            ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
+
+            cv::normalize(out, display, 0, 255, cv::NORM_MINMAX);
+            display.convertTo(display, CV_8U);
+
+            std::cout << "params: bias=" << params.bias
+                      << " lambda=" << params.lambda
+                      << " k1=" << params.k1
+                      << " k2=" << params.k2
+                      << " dde=" << params.dde
+                      << " bright=" << params.bright
+                      << " t=" << ms << "ms\n";
+        }
     }
-
-    std::cout << "\nФайлы сохранены в текущей директории "
-              << "(out_*.png — результаты, stepNN_*.png — промежуточные слои по шагам 1-8).\n";
-    return 0;
 }
