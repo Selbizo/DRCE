@@ -3,11 +3,12 @@
 // Клавиши управления (терминал):
 //   a/d   – bias           (±1)
 //   w/x   – lambda         (±1)
-//   j/k   – k1             (±0.1)
-//   u/i   – k2             (±0.1)
+//   k/j   – k1             (±0.1)
+//   i/u   – k2             (±0.1)
 //   o/p   – dde            (±0.1)
 //   l/m   – bright         (±1)
-//   f/h   – delta2         (±0.5)
+//   f/h   – delta2         (±10)
+//   t/g   – blockRows/Cols (±1 блок, размер ~ N/M)
 //   r     – сброс к дефолту
 //   s     – сохранить out_drce_loc.png с текущими параметрами
 //   Esc   – выход
@@ -137,8 +138,8 @@ int main(int argc, char** argv) {
     // --- DRCE-LOC с интерактивной настройкой ---
     DRCELOC::Params params;
     // Размер блока ~64x64 при 1024x768, как рекомендует Section 2.4 статьи.
-    params.blockRows = std::max(1, src.rows / 32);
-    params.blockCols = std::max(1, src.cols / 32);
+    params.blockRows = std::max(1, src.rows / 16);
+    params.blockCols = std::max(1, src.cols / 16);
     params.delta2   = 3600.0;
     params.bias     = 100.0;
     params.lambda   = 200.0;
@@ -146,6 +147,8 @@ int main(int argc, char** argv) {
     params.k2       = 0.4;
     params.dde      = 1.0;
     params.bright   = 128.0;
+
+    int blockDiv = 64;  // делитель размера блока (меняется [t]/[g])
 
     auto t0 = std::chrono::high_resolution_clock::now();
     DRCELOC algo(params);
@@ -171,6 +174,7 @@ int main(int argc, char** argv) {
             "dde    [o][p]= " + fmt(params.dde, 4),
             "bright [l][m]= " + fmt(params.bright, 6),
             "delta2 [f][h]= " + fmt(params.delta2, 6),
+            "block  [t][g]= " + std::to_string(src.rows / blockDiv),
             "----------------",
             "time   = " + std::to_string((int)ms).substr(0, 4) + " ms"
         };
@@ -200,13 +204,16 @@ int main(int argc, char** argv) {
                 break;
 
             case 114: // 'r' — сброс к дефолту
-                params.bias     = 100.0;
-                params.lambda   = 200.0;
-                params.k1       = 1.0;
-                params.k2       = 0.4;
-                params.dde      = 1.0;
-                params.bright   = 128.0;
-                params.delta2   = -1.0;
+                blockDiv          = 64;
+                params.blockRows  = std::max(1, src.rows / blockDiv);
+                params.blockCols  = std::max(1, src.cols / blockDiv);
+                params.bias       = 100.0;
+                params.lambda     = 200.0;
+                params.k1         = 1.0;
+                params.k2         = 0.4;
+                params.dde        = 1.0;
+                params.bright     = 128.0;
+                params.delta2     = -1.0;
                 changed = true;
                 break;
 
@@ -238,6 +245,16 @@ int main(int argc, char** argv) {
                 params.delta2   -= 10.0f;  changed = true; break;
             case 'h':   // delta2 +1.0
                 params.delta2   += 10.0f;  changed = true; break;
+            case 't':   // blockRows/Cols -1 (увеличить блок)
+                blockDiv        = std::max(2, blockDiv + 1);
+                params.blockRows = std::max(1, src.rows / blockDiv);
+                params.blockCols = std::max(1, src.cols / blockDiv);
+                changed = true; break;
+            case 'g':   // blockRows/Cols +1 (уменьшить блок)
+                blockDiv        = std::max(2, blockDiv - 1);
+                params.blockRows = std::max(1, src.rows / blockDiv);
+                params.blockCols = std::max(1, src.cols / blockDiv);
+                changed = true; break;
 
             default:
                 // Непознанная клавиша — игнорируем
