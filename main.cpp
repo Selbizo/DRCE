@@ -2,11 +2,12 @@
 //
 // Клавиши управления (терминал):
 //   a/d   – bias           (±1)
-//   w/s   – lambda         (±1)
-//   k/j   – k1             (±0.1)
-//   i/u   – k2             (±0.1)
+//   w/x   – lambda         (±1)
+//   j/k   – k1             (±0.1)
+//   u/i   – k2             (±0.1)
 //   o/p   – dde            (±0.1)
-//   l/;   – bright         (±1)
+//   l/m   – bright         (±1)
+//   f/h   – delta2         (±0.5)
 //   r     – сброс к дефолту
 //   s     – сохранить out_drce_loc.png с текущими параметрами
 //   Esc   – выход
@@ -20,8 +21,19 @@
 #include "drce_loc.hpp"
 #include <chrono>
 #include <iostream>
+#include <sstream>
 #include <opencv2/highgui.hpp>
 #include <opencv2/imgproc.hpp>
+
+static std::string fmt(double v, int width) {
+    std::ostringstream ss;
+    ss.precision(3);
+    ss << std::fixed << v;
+    std::string s = ss.str();
+    if (s.size() > (size_t)width) s.resize(width);
+    else s.resize(width, ' ');
+    return s;
+}
 
 static cv::Mat makeSyntheticHDRScene(int rows = 768, int cols = 1024) {
     // Эмуляция 14-битного сенсора (диапазон исходных данных 0..16383),
@@ -127,7 +139,7 @@ int main(int argc, char** argv) {
     // Размер блока ~64x64 при 1024x768, как рекомендует Section 2.4 статьи.
     params.blockRows = std::max(1, src.rows / 32);
     params.blockCols = std::max(1, src.cols / 32);
-    params.delta2   = -1.0;
+    params.delta2   = 3600.0;
     params.bias     = 100.0;
     params.lambda   = 200.0;
     params.k1       = 1.0;
@@ -149,18 +161,27 @@ int main(int argc, char** argv) {
     cv::namedWindow(windowName, cv::WINDOW_AUTOSIZE);
 
     while (true) {
-        // Формируем строку с текущими параметрами
-        std::string info = "bias [a,d]=" + std::to_string(params.bias).substr(0, 5) +
-                           " lambda [w,x]=" + std::to_string(params.lambda).substr(0, 5) +
-                           " k1 [k,j]=" + std::to_string(params.k1).substr(0, 4) +
-                           " k2 [i,u]=" + std::to_string(params.k2).substr(0, 4) +
-                           " dde [o,p]=" + std::to_string(params.dde).substr(0, 4) +
-                           " bright [;,']=" + std::to_string(params.bright).substr(0, 5) +
-                           " | t=" + std::to_string(ms).substr(0, 5) + "ms";
+        // Формируем вертикальный список параметров слева
+        std::vector<std::string> lines = {
+            "=== DRCE-LOC ===",
+            "bias   [a][d]= " + fmt(params.bias, 6),
+            "lambda [w][x]= " + fmt(params.lambda, 6),
+            "k1     [k][j]= " + fmt(params.k1, 4),
+            "k2     [i][u]= " + fmt(params.k2, 4),
+            "dde    [o][p]= " + fmt(params.dde, 4),
+            "bright [l][m]= " + fmt(params.bright, 6),
+            "delta2 [f][h]= " + fmt(params.delta2, 6),
+            "----------------",
+            "time   = " + std::to_string((int)ms).substr(0, 4) + " ms"
+        };
 
         cv::Mat vis = display.clone();
-        cv::putText(vis, info, cv::Point(10, 25),
-                    cv::FONT_HERSHEY_SIMPLEX, 0.55, cv::Scalar(0, 255, 0), 1);
+        int y = 20;
+        for (const auto& line : lines) {
+            cv::putText(vis, line, cv::Point(10, y),
+                        cv::FONT_HERSHEY_SIMPLEX, 0.45, cv::Scalar(0, 255, 0), 1);
+            y += 16;
+        }
 
         cv::imshow(windowName, vis);
 
@@ -185,6 +206,7 @@ int main(int argc, char** argv) {
                 params.k2       = 0.4;
                 params.dde      = 1.0;
                 params.bright   = 128.0;
+                params.delta2   = -1.0;
                 changed = true;
                 break;
 
@@ -208,10 +230,14 @@ int main(int argc, char** argv) {
                 params.dde      += 0.1f; changed = true; break;
             case 'p':   // dde -0.1
                 params.dde      -= 0.1f; changed = true; break;
-            case ';':   // bright +1  (key right of 'l' on US keyboard)
+            case 'l':   // bright +1  (key right of 'l' on US keyboard)
                 params.bright   += 1.0f; changed = true; break;
-            case '\'':  // bright -1  (apostrophe, next to ';')
+            case 'm':  // bright -1  (apostrophe, next to ';')
                 params.bright   -= 1.0f; changed = true; break;
+            case 'f':   // delta2 -1.0
+                params.delta2   -= 10.0f;  changed = true; break;
+            case 'h':   // delta2 +1.0
+                params.delta2   += 10.0f;  changed = true; break;
 
             default:
                 // Непознанная клавиша — игнорируем
