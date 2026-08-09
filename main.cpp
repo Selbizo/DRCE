@@ -3,16 +3,12 @@
 #include <vector>
 #include <utility>
 //
-// Использование:
-//   ./drce_loc_demo [путь_к_изображению]
 //
 // Если путь не задан или файл не открылся — генерируется синтетическая
 // сцена с высоким динамическим диапазоном (аналог "rich scene" из статьи:
 // яркое небо + тёмное здание + мелкие цели), сохранённая как 16-битный
 // PNG, чтобы было на чём проверить сжатие ДД 14/16 бит -> 8 бит.
-//
-// Сборка:
-//   g++ -O2 -std=c++17 main.cpp drce_loc.cpp `pkg-config --cflags --libs opencv4` -o drce_loc_demo
+
 
 #include "drce_loc.hpp"
 #include <chrono>
@@ -25,20 +21,40 @@ static cv::Mat makeSyntheticHDRScene(int rows = 768, int cols = 1024) {
 
     // Яркое "небо" сверху с плавным градиентом (высокий сигнал).
     for (int i = 0; i < rows; ++i) {
-        float skyVal = 14000.0f - 20.0f * i; // спадает к горизонту
         for (int j = 0; j < cols; ++j) {
-            scene.at<float>(i, j) = std::max(6000.0f, skyVal);
+            float skyVal = 16000.0f - 10.0f * i - 5.0f * j; // спадает к горизонту и вправо
+            scene.at<float>(i, j) = std::max(5000.0f, skyVal);
         }
     }
 
-    // Тёмное "здание" снизу с оконной текстурой (низкий сигнал, высокая деталь).
-    int horizon = rows * 55 / 100;
+    // Три тёмных "здания" снизу с оконной текстурой (низкий сигнал, высокая деталь).
+    int horizon = rows * 45 / 100;
+
     for (int i = horizon; i < rows; ++i) {
-        for (int j = 0; j < cols; ++j) {
-            float base = 700.0f + 150.0f * std::sin(j * 0.35) * std::sin(j * 0.35);
+        for (int j = cols*0.3; j < cols*0.6; ++j) {
+            float base = 500.0f + 100.0f * std::sin(j * 0.45) * std::sin(j * 0.45);
             bool windowRow = ((i - horizon) % 18) < 10;
             bool windowCol = (j % 22) < 14;
-            float win = (windowRow && windowCol) ? 2600.0f : 0.0f; // реалистичная амплитуда детали на низком сигнале
+            float win = (windowRow && windowCol) ? 1300.0f : 200.0f; // реалистичная амплитуда детали на низком сигнале
+            scene.at<float>(i, j) = base + win;
+        }
+    }
+    for (int i = horizon*1.1; i < rows; ++i) {
+        for (int j = cols*0.2; j < cols*0.4; ++j) {
+            float base = 600.0f + 150.0f * std::sin(j * 0.35) * std::sin(j * 0.35);
+            bool windowRow = ((i - horizon) % 15) < 10;
+            bool windowCol = (j % 18) < 14;
+            float win = (windowRow && windowCol) ? 1700.0f : 300.0f; // реалистичная амплитуда детали на низком сигнале
+            scene.at<float>(i, j) = base + win;
+        }
+    }
+
+    for (int i = horizon*1.2; i < rows; ++i) {
+        for (int j = cols*0.5; j < cols*0.8; ++j) {
+            float base = 700.0f + 170.0f * std::sin(j * 0.35) * std::sin(j * 0.35);
+            bool windowRow = ((i - horizon) % 15) < 10;
+            bool windowCol = (j % 20) < 14;
+            float win = (windowRow && windowCol) ? 1600.0f : 250.0f; // реалистичная амплитуда детали на низком сигнале
             scene.at<float>(i, j) = base + win;
         }
     }
@@ -46,6 +62,7 @@ static cv::Mat makeSyntheticHDRScene(int rows = 768, int cols = 1024) {
     // Мелкие яркие цели на фоне неба (аналог "small target scene").
     cv::circle(scene, cv::Point(cols * 0.75, rows * 0.15), 2, cv::Scalar(16000), -1);
     cv::circle(scene, cv::Point(cols * 0.80, rows * 0.12), 1, cv::Scalar(15500), -1);
+    cv::circle(scene, cv::Point(cols * 0.10, rows * 0.03), 1, cv::Scalar(14500), -1);
 
     // Шум сенсора.
     cv::Mat noise(rows, cols, CV_32F);
@@ -99,9 +116,10 @@ int main(int argc, char** argv) {
     // --- DRCE-LOC ---
     DRCELOC::Params params;
     // Размер блока ~64x64 при 1024x768, как рекомендует Section 2.4 статьи.
-    params.blockRows = std::max(1, src.rows / 64);
-    params.blockCols = std::max(1, src.cols / 64);
-    params.bias   = 200.0;
+    params.blockRows = std::max(1, src.rows / 32);
+    params.blockCols = std::max(1, src.cols / 32);
+    params.delta2   = -1.0;
+    params.bias   = 100.0;
     params.lambda = 200.0;
     params.k1 = 1.0;
     params.k2 = 0.4;
@@ -121,13 +139,14 @@ int main(int argc, char** argv) {
     cv::imwrite("out_drce_loc.png", out);
 
     // Промежуточные слои — для отладки/апробации (сравнение с Figure 4-5 статьи).
-    saveNorm("dbg_block_std.png", algo.debug().blockStd);
-    saveNorm("dbg_NStretch.png", algo.debug().NStretch);
-    saveNorm("dbg_NMean.png", algo.debug().NMean);
-    saveNorm("dbg_gf_detail.png", algo.debug().gfDetail);
-    saveNorm("dbg_Igc.png", algo.debug().Igc);
-    saveNorm("dbg_base_out.png", algo.debug().baseOut);
-    saveNorm("dbg_detail_out.png", algo.debug().detailOut);
+    // Нумерация соответствует шагам алгоритма (Section 2.1, Figure 2 статьи).
+    saveNorm("step01_block_std.png",  algo.debug().blockStd);
+    saveNorm("step03_NStretch.png",   algo.debug().NStretch);
+    saveNorm("step03_NMean.png",      algo.debug().NMean);
+    saveNorm("step04_gf_detail.png",  algo.debug().gfDetail);
+    saveNorm("step05_Igc.png",        algo.debug().Igc);
+    saveNorm("step06_base_out.png",   algo.debug().baseOut);
+    saveNorm("step07_detail_out.png", algo.debug().detailOut);
 
     // --- Метрики из статьи (Section 3.1): RMS (Eq.9), Entropy (Eq.10), Tenengrad (Eq.13) ---
     auto computeRMS = [](const cv::Mat& img8u) {
@@ -168,6 +187,6 @@ int main(int argc, char** argv) {
     }
 
     std::cout << "\nФайлы сохранены в текущей директории "
-              << "(out_*.png — результаты, dbg_*.png — промежуточные слои).\n";
+              << "(out_*.png — результаты, stepNN_*.png — промежуточные слои по шагам 1-8).\n";
     return 0;
 }
