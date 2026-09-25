@@ -30,9 +30,15 @@
 #include <chrono>
 #include <iostream>
 #include <sstream>
+#include <vector>
 #include <opencv2/highgui.hpp>
 #include <opencv2/imgproc.hpp>
 #include <opencv2/videoio.hpp>
+
+// Коэффициенты фотопической (дневной) светочувствительности по каналам (ITU-R BT.601).
+static const double kCr = 0.299;
+static const double kCg = 0.587;
+static const double kCb = 0.114;
 
 static std::string fmt(double v, int width) {
     std::ostringstream ss;
@@ -136,8 +142,14 @@ int main(int argc, char** argv) {
             return 1;
         }
         cv::cvtColor(frameBGR, rgbFrame, cv::COLOR_BGR2RGB);
-        cv::cvtColor(rgbFrame, gray8u, cv::COLOR_RGB2GRAY);
-        gray8u.convertTo(src, CV_16U, 64.0, 0.0);
+        // Brightness = (R*Cr + G*Cg + B*Cb) * 16384 / 256 == luminance * 64.
+        // Фотопическая яркость сразу в 14-bit, без 8-битной квантизации.
+        cv::Mat rgbF;
+        rgbFrame.convertTo(rgbF, CV_64F);   // CV_64FC3 (R,G,B)
+        std::vector<cv::Mat> channels;
+        cv::split(rgbF, channels);          // каждый канал — отдельный CV_64UC1
+        cv::Mat lum = (channels[0] * kCr + channels[1] * kCg + channels[2] * kCb) * 64.0;
+        lum.convertTo(src, CV_16U);
     }
 
     if (!cameraMode && argc > 1) {
@@ -200,9 +212,14 @@ int main(int argc, char** argv) {
             cap >> frameBGR;
             if (frameBGR.empty()) break;
             cv::cvtColor(frameBGR, rgbFrame, cv::COLOR_BGR2RGB);
-            cv::cvtColor(rgbFrame, gray8u, cv::COLOR_RGB2GRAY);
-            // 8-битный черно-белый кадр -> номинальный 14-битный диапазон (x64).
-            gray8u.convertTo(src, CV_16U, 64.0, 0.0);
+            // Brightness = (R*Cr + G*Cg + B*Cb) * 16384 / 256 == luminance * 64.
+            // Фотопическая яркость сразу в 14-bit, без 8-битной квантизации.
+            cv::Mat rgbF;
+            rgbFrame.convertTo(rgbF, CV_64F);   // CV_64FC3 (R,G,B)
+            std::vector<cv::Mat> channels;
+            cv::split(rgbF, channels);          // каждый канал — отдельный CV_64UC1
+            cv::Mat lum = (channels[0] * kCr + channels[1] * kCg + channels[2] * kCb) * 64.0;
+            lum.convertTo(src, CV_16U);
         }
 
         // Формируем вертикальный список параметров слева
