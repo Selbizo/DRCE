@@ -1,6 +1,13 @@
 // Демо/тест DRCE-LOC с интерактивной настройкой параметров (GUI).
 //
-// Клавиши управления (терминал):
+// Режимы входа:
+//   1. Аргумент — путь к 14/16-битному PNG:  ./drce_loc_demo input.png
+//   2. Без аргументов — синтетическая HDR-сцена (статическая).
+//   3. Флаг --camera — захват с веб-камеры в реальном времени:
+//      ./drce_loc_demo --camera
+//      Камера: BGR 8-bit -> grayscale -> 14-bit (CV_16U) -> DRCE-LOC.
+//
+// Клавиши управления (статический режим, терминал):
 //   a/d   – bias           (±1)
 //   w/x   – lambda         (±1)
 //   k/j   – k1             (±0.1)
@@ -13,10 +20,10 @@
 //   s     – сохранить out_drce_loc.png с текущими параметрами
 //   Esc   – выход
 //
-// Если путь не задан или файл не открылся — генерируется синтетическая
-// сцена с высоким динамическим диапазоном (аналог "rich scene" из статьи:
-// яркое небо + тёмное здание + мелкие цели), сохранённая как 16-битный
-// PNG, чтобы было на чём проверить сжатие ДД 14/16 бит -> 8 бит.
+// Клавиши управления (режим камеры):
+//   Esc   – выход
+//   s     – сохранить обработанный кадр как out_camera_frame.png
+//   r     – сброс параметров к дефолту
 
 
 #include "drce_loc.hpp"
@@ -25,6 +32,7 @@
 #include <sstream>
 #include <opencv2/highgui.hpp>
 #include <opencv2/imgproc.hpp>
+#include <opencv2/videoio.hpp>
 
 static std::string fmt(double v, int width) {
     std::ostringstream ss;
@@ -106,12 +114,36 @@ static void saveNorm(const std::string& path, const cv::Mat& m32f_or_64f) {
 }
 
 int main(int argc, char** argv) {
+    bool cameraMode = (argc > 1 && std::string(argv[1]) == "--camera");
     cv::Mat src;
+    cv::VideoCapture cap;
+    cv::Mat frameBGR, rgbFrame, gray8u;
 
-    if (argc > 1) {
+    if (cameraMode) {
+        cap.open(0);
+        if (!cap.isOpened()) {
+            std::cerr << "Не удалось открыть камеру (index 0).\n";
+            return 1;
+        }
+        // cap.set(cv::CAP_PROP_FRAME_WIDTH, 1024);
+        // cap.set(cv::CAP_PROP_FRAME_HEIGHT, 768);
+        std::cout << "Режим камеры: BGR 8-bit -> RGB -> grayscale -> 14-bit (CV_16U)\n";
+
+        // Читаем начальный кадр, чтобы заполнить src до секции baseline.
+        cap >> frameBGR;
+        if (frameBGR.empty()) {
+            std::cerr << "Не удалось прочитать начальный кадр с камеры.\n";
+            return 1;
+        }
+        cv::cvtColor(frameBGR, rgbFrame, cv::COLOR_BGR2RGB);
+        cv::cvtColor(rgbFrame, gray8u, cv::COLOR_RGB2GRAY);
+        gray8u.convertTo(src, CV_16U, 64.0, 0.0);
+    }
+
+    if (!cameraMode && argc > 1) {
         src = cv::imread(argv[1], cv::IMREAD_ANYDEPTH | cv::IMREAD_GRAYSCALE);
     }
-    if (src.empty()) {
+    if (!cameraMode && src.empty()) {
         std::cout << "Входное изображение не задано/не открыто — "
                      "генерирую синтетическую 14-битную сцену.\n";
         src = makeSyntheticHDRScene();
@@ -164,6 +196,15 @@ int main(int argc, char** argv) {
     cv::namedWindow(windowName, cv::WINDOW_AUTOSIZE);
 
     while (true) {
+        if (cameraMode) {
+            cap >> frameBGR;
+            if (frameBGR.empty()) break;
+            cv::cvtColor(frameBGR, rgbFrame, cv::COLOR_BGR2RGB);
+            cv::cvtColor(rgbFrame, gray8u, cv::COLOR_RGB2GRAY);
+            // 8-битный черно-белый кадр -> номинальный 14-битный диапазон (x64).
+            gray8u.convertTo(src, CV_16U, 64.0, 0.0);
+        }
+
         // Формируем вертикальный список параметров слева
         std::vector<std::string> lines = {
             "=== DRCE-LOC ===",
@@ -189,18 +230,24 @@ int main(int argc, char** argv) {
 
         cv::imshow(windowName, vis);
 
-        int key = cv::waitKey(0) & 0xFF;
+        int key = cv::waitKey(cameraMode ? 1 : 0) & 0xFF;
         bool changed = false;
 
         switch (key) {
             case 27:  // Esc — выход
                 cv::destroyAllWindows();
+                if (cameraMode) cap.release();
                 cv::imwrite("out_drce_loc.png", display);
                 return 0;
 
             case 115: // 's' — сохранить результат
-                cv::imwrite("out_drce_loc.png", display);
-                std::cout << "Сохранено: out_drce_loc.png\n";
+                if (cameraMode) {
+                    cv::imwrite("out_camera_frame.png", display);
+                    std::cout << "Сохранено: out_camera_frame.png\n";
+                } else {
+                    cv::imwrite("out_drce_loc.png", display);
+                    std::cout << "Сохранено: out_drce_loc.png\n";
+                }
                 break;
 
             case 114: // 'r' — сброс к дефолту
@@ -261,7 +308,7 @@ int main(int argc, char** argv) {
                 break;
         }
 
-        if (changed) {
+        if (changed || cameraMode) {
             t0 = std::chrono::high_resolution_clock::now();
             DRCELOC algo2(params);
             out = algo2.process(src);
@@ -271,13 +318,15 @@ int main(int argc, char** argv) {
             cv::normalize(out, display, 0, 255, cv::NORM_MINMAX);
             display.convertTo(display, CV_8U);
 
-            std::cout << "params: bias=" << params.bias
-                      << " lambda=" << params.lambda
-                      << " k1=" << params.k1
-                      << " k2=" << params.k2
-                      << " dde=" << params.dde
-                      << " bright=" << params.bright
-                      << " t=" << ms << "ms\n";
+            if (changed) {
+                std::cout << "params: bias=" << params.bias
+                          << " lambda=" << params.lambda
+                          << " k1=" << params.k1
+                          << " k2=" << params.k2
+                          << " dde=" << params.dde
+                          << " bright=" << params.bright
+                          << " t=" << ms << "ms\n";
+            }
         }
     }
 }
